@@ -1,4 +1,6 @@
+import hashlib
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -197,7 +199,40 @@ def netburst_features(bursts_well, T):
     )
 
 
-def read_ephys(path):
+SPIKE_COLS = ['Well Label', 'Channel ID', 'Timestamp [µs]']
+BURST_COLS = ['Well Label', 'Channel ID', 'Start timestamp [µs]', 'Duration [µs]', 'Spike Count']
+NETBURST_COLS = ['Well Label', 'Start timestamp [µs]', 'Duration [µs]', 'Spike Count']
+
+
+def read_ephys(path, wells=None, cache_dir=None):
+    """
+    Load the spikes/bursts/networkbursts CSVs for a recording file.
+
+    Only reads the columns actually used downstream (dropping the large
+    per-row string columns like 'Compound Name'/'Experiment' cuts parse
+    time by >10x on a full-plate file). Pass `wells` (a well label, or a
+    list of them) to also drop rows for other wells right after reading,
+    which is nearly free once the unused columns are gone - useful when
+    you only need one or two wells out of a full plate (e.g. for a
+    one-off plot) rather than every well on it.
+
+    Column/row pruning still can't avoid reading every byte of a large
+    CSV off disk on its first touch. If the same (file, wells) pair gets
+    read repeatedly (e.g. re-running an exploratory plotting cell), pass
+    `cache_dir` to cache the already-narrowed result on local disk, keyed
+    by the source file's path and mtime - later calls skip the CSV read
+    entirely. Source recordings are treated as immutable once written; the
+    cache is invalidated only if the file's mtime changes.
+    """
+    cache_file = None
+    if cache_dir is not None:
+        os.makedirs(cache_dir, exist_ok=True)
+        key = f"{path}|{wells}|{os.path.getmtime(path)}"
+        digest = hashlib.md5(key.encode()).hexdigest()[:16]
+        cache_file = os.path.join(cache_dir, f"{digest}.pkl")
+        if os.path.exists(cache_file):
+            return pd.read_pickle(cache_file)
+
     split_file = path.split('_')
     split_file[-1] = 'networkbursts.csv'
     netburst_file = '_'.join(split_file)
@@ -205,9 +240,18 @@ def read_ephys(path):
     spike_file = '_'.join(split_file)
     split_file[-1] = 'bursts.csv'
     burst_file = '_'.join(split_file)
-    spikes = pd.read_csv(spike_file)
-    netbursts = pd.read_csv(netburst_file)
-    bursts = pd.read_csv(burst_file)
+    spikes = pd.read_csv(spike_file, usecols=SPIKE_COLS)
+    netbursts = pd.read_csv(netburst_file, usecols=NETBURST_COLS)
+    bursts = pd.read_csv(burst_file, usecols=BURST_COLS)
+    if wells is not None:
+        wells = [wells] if isinstance(wells, str) else wells
+        spikes = spikes[spikes['Well Label'].isin(wells)]
+        bursts = bursts[bursts['Well Label'].isin(wells)]
+        netbursts = netbursts[netbursts['Well Label'].isin(wells)]
+
+    if cache_file is not None:
+        pd.to_pickle((spikes, bursts, netbursts), cache_file)
+
     return spikes, bursts, netbursts
 
 
@@ -339,11 +383,29 @@ def flag_real_bursts(st_p, b_times, mad_multiplier=0.5):
     return is_real, burst_median_isi, modified_z
 
 
-def get_new_bursts(st, gid):
+# Defaults for get_pop_bursts, used whenever get_new_bursts/get_features/
+# process_recording_file/process_multidrug_recording_file are called without
+# an explicit `burst_params` dict. Pass burst_params through from a notebook
+# to use different burst-detection settings for a different dataset without
+# touching this file - see get_pop_bursts for what each key means.
+DEFAULT_BURST_PARAMS = dict(
+    maxISIstart=100,
+    maxISIb=250,
+    minBdur=20,
+    minIBI=20,
+    minSburst=5,
+    onset_threshold=6,
+    min_active_electrodes=6,
+    mad_multiplier=0.5,
+)
+
+
+def get_new_bursts(st, gid, burst_params=None):
     st_flat = np.asarray(st).ravel()
     gid_flat = np.asarray(gid).ravel()
 
-    b_times = get_pop_bursts(st_flat, gid_flat)
+    params = DEFAULT_BURST_PARAMS if burst_params is None else burst_params
+    b_times = get_pop_bursts(st_flat, gid_flat, **params)
 
     n_bursts = len(b_times)
     if n_bursts > 3:
@@ -367,8 +429,14 @@ def get_new_bursts(st, gid):
     )
 
 
-def get_features(well_name, spikes, bursts, netbursts):
-    """ Collect features for a well """
+def get_features(well_name, spikes, bursts, netbursts, burst_params=None):
+    """ Collect features for a well.
+
+    burst_params: optional dict of get_pop_bursts kwargs (maxISIstart,
+    maxISIb, minBdur, minIBI, minSburst, onset_threshold,
+    min_active_electrodes, mad_multiplier) used for the NIBInew/NBDnew
+    features. Defaults to DEFAULT_BURST_PARAMS when not given.
+    """
     spikes_well = spikes[spikes['Well Label'] == well_name]
     bursts_well = bursts[bursts['Well Label'] == well_name]
     netbursts_well = netbursts[netbursts['Well Label'] == well_name]
@@ -379,7 +447,7 @@ def get_features(well_name, spikes, bursts, netbursts):
         mean_isi, cv_isi, frN, spike_counts = spike_features(st, gid, T)
         mibis, cv_ibis, burst_rates, mbd, cv_bds, avg_rate_in_burst = burst_features(bursts_well, T)
         netmibi, netcvIBI, net_burst_rate, net_mbd, net_cvbs, in_burst_spikes, in_net_burst_rate, n_bursts, total_burst_time, smbr = netburst_features(netbursts_well, T)
-        mean_ibi_new, cv_ibi_new, mean_burst_duration_new, cv_burst_duration_new = get_new_bursts(st, gid)
+        mean_ibi_new, cv_ibi_new, mean_burst_duration_new, cv_burst_duration_new = get_new_bursts(st, gid, burst_params=burst_params)
         random_spikes = ((np.sum(spike_counts) - in_burst_spikes) / np.sum(spike_counts)) * 100
         feats = [mean_isi, cv_isi, frN,
                  mibis, cv_ibis, burst_rates,
@@ -411,7 +479,7 @@ def read_layout(filename):
     return result
 
 
-def process_recording_file(main_path, layouts_path, diff, week, file):
+def process_recording_file(main_path, layouts_path, diff, week, file, burst_params=None):
     """Process one recording file: parse its name, load its well layout, read its
     spikes/bursts/netbursts CSVs once, and compute features for every well.
 
@@ -419,6 +487,11 @@ def process_recording_file(main_path, layouts_path, diff, week, file):
     file is independent, so it can run inside a ProcessPoolExecutor worker.
     Must stay a plain module-level function (not a notebook closure) so it can
     be pickled and sent to worker processes.
+
+    burst_params: optional dict of get_pop_bursts kwargs, forwarded to
+    get_features for every well in this file - see get_features/
+    DEFAULT_BURST_PARAMS. Lets one notebook use different burst-detection
+    settings than another without editing this file.
 
     Returns:
         (results, skipped): results is a list of (id_, row) tuples; skipped is
@@ -441,9 +514,369 @@ def process_recording_file(main_path, layouts_path, diff, week, file):
         if LTXcondition in ('X', 'Y'):
             continue
         id_ = f"{rec_date}_{well}_{batch}_{line}_{treatment_time}_{DIV}_{drug}"
-        features = get_features(well, spikes, bursts, netbursts)
+        features = get_features(well, spikes, bursts, netbursts, burst_params=burst_params)
         row = [file_path, line, diff_date, batch, week, DIV, treatment_time, rec_date,
                layout_name, well, drug, LTXcondition, *features]
+        results.append((id_, row))
+
+    return results, None
+
+
+def read_layout_single(filename, sheet_name):
+    """Read one sheet of a per-cell-line layout workbook into well -> condition.
+
+    Used for experiments where multiple drugs share one plate/layout, so the
+    layout lives in one Excel workbook per cell line with one sheet per
+    "<diff_date>_<letter>" batch, rather than one file per (line, drug, diff).
+    """
+    try:
+        layout_df = pd.read_csv(filename, sep=';')
+    except Exception:
+        # Compatibility with hannas files
+        layout_df = pd.read_excel(filename, sheet_name=sheet_name).dropna()
+
+    result = {}
+    for _, row in layout_df.iterrows():
+        row_label = row.iloc[0]  # First column (A, B, C, D)
+        for col_idx, value in enumerate(row.iloc[1:], start=1):
+            result[f"{row_label}{col_idx}"] = value
+    return result
+
+
+def parse_condition(raw):
+    """Split a combined "DRUG (DOSE)" layout cell into (drug, dose).
+
+    Plain values with no parenthesised dose (e.g. 'untreated', 'DMSO') return
+    (None, raw) - they aren't tied to one specific drug on a multi-drug plate.
+    Drug names have internal hyphens stripped ('LTX-2' -> 'LTX2') to match
+    the drug naming used for single-drug-per-plate experiments.
+    """
+    raw = str(raw).strip()
+    m = re.match(r'^(.*?)\s*\(([^)]+)\)\s*$', raw)
+    if m:
+        return m.group(1).replace('-', ''), m.group(2).strip()
+    return None, raw
+
+
+def process_multidrug_recording_file(main_path, layouts_path, diff, week, file, burst_params=None):
+    """Process one recording file from a multi-drug-per-plate experiment:
+    parse its name, load its well layout (one sheet of a per-cell-line
+    workbook), read its spikes/bursts/netbursts CSVs once, and compute
+    features for every well.
+
+    Unlike process_recording_file, a single file/plate here isn't dedicated
+    to one drug - each well's layout cell is a combined "DRUG (DOSE)" string
+    (or 'untreated'/'DMSO' with no drug), parsed via parse_condition into
+    separate drug/dose columns.
+
+    Filename convention: exp_line_DIV_letter_treatmenttime_diffdate_recdate_*
+    (8 fields, no separate drug/batch field - `week` is expected to already
+    include any trailing path segment, e.g. 'week4/Export').
+
+    This is the unit of parallelism for building the conditions table - each
+    file is independent, so it can run inside a ProcessPoolExecutor worker.
+    Must stay a plain module-level function (not a notebook closure) so it
+    can be pickled and sent to worker processes.
+
+    burst_params: optional dict of get_pop_bursts kwargs, forwarded to
+    get_features for every well in this file - see get_features/
+    DEFAULT_BURST_PARAMS. Lets this dataset use different burst-detection
+    settings than another notebook without editing this file.
+
+    Returns:
+        (results, skipped): results is a list of (id_, row) tuples; skipped
+        is the filename if it didn't match the expected 8-field naming
+        convention or had no matching layout sheet, otherwise None.
+    """
+    sp_file = file.split('_')
+    if len(sp_file) != 8:
+        return [], file
+
+    exp, line, DIV, letter, treatment_time, diff_date, rec_date, _ = sp_file
+    layout_name = line
+    try:
+        layout = read_layout_single(os.path.join(layouts_path, layout_name + '.xlsx'),
+                                     f'{diff_date}_{letter}')
+    except Exception as e:
+        print(f"read_layout_single error ({file}):", e)
+        return [], file
+
+    file_path = os.path.join(main_path, diff, week, file)
+    spikes, bursts, netbursts = read_ephys(file_path)
+
+    results = []
+    for well, condition in layout.items():
+        if condition in ('X', 'Y'):
+            continue
+        drug, dose = parse_condition(condition)
+        id_ = f"{rec_date}_{well}_{line}_{treatment_time}_{DIV}_{letter}"
+        features = get_features(well, spikes, bursts, netbursts, burst_params=burst_params)
+        row = [file_path, line, diff_date, week, DIV, treatment_time, rec_date,
+               layout_name, well, drug, dose, condition, *features]
+        results.append((id_, row))
+
+    return results, None
+
+
+def parse_fused_condition(raw):
+    """Split a "DRUG_DOSEuM" layout cell (e.g. 'LTX5_0.1uM') into (drug, dose).
+
+    Used for single-compound follow-up datasets (e.g. LTX5) where the layout
+    cell's dose has an explicit unit suffix and underscore separator, unlike
+    the "DRUG (DOSE)" convention in parse_condition. Plain values with no
+    concentration (e.g. 'DMSO', 'NSC') are conditions in their own right -
+    the whole label becomes `drug` with dose '' (not a numeric dose, and not
+    None either - `dose` gets cast via na(..., dtype=str) downstream, which
+    would turn a None into the literal string "None").
+    """
+    raw = str(raw).strip()
+    m = re.match(r'^([A-Za-z0-9]+)_([\d.]+)uM$', raw)
+    if m:
+        return m.group(1), m.group(2)
+    return raw, ''
+
+
+def process_fused_drug_recording_file(main_path, layouts_path, drug, diff, week, file, burst_params=None):
+    """Process one recording file from a single-compound follow-up experiment
+    (e.g. LTX5): one plate per cell line, `drug` is the experiment's primary
+    compound, and each well's condition varies by *dose* (or a reference
+    comparator drug / vehicle), not by drug identity - unlike
+    process_multidrug_recording_file where the whole point is drug varying
+    per well.
+
+    Two conventions this handles that the other processors don't:
+    - The filename's treatment-time field has `drug` fused onto it for every
+      non-baseline timepoint (e.g. 'LTX51h' -> drug 'LTX5', treatment_time
+      '1h'; 'LTX524h' -> '24h'; 'baseline' is left bare, since it predates
+      any treatment). A prefix that doesn't match `drug` or 'baseline' is
+      kept as-is rather than guessed at, so an unexpected value surfaces
+      instead of being silently mislabeled.
+    - Layout files are per-cell-line `.ods` (LibreOffice/OpenDocument)
+      workbooks with a single, unnamed-convention sheet - unlike the `.xlsx`
+      workbooks with one sheet per diff-batch used elsewhere. Reading `.ods`
+      requires the `odfpy` package (`pd.read_excel(..., engine='odf')`).
+      Because a follow-up experiment like this only spans one differentiation,
+      there's no per-batch sheet to look up - the first (only) sheet is used
+      directly. The layout filename is reconstructed from the recording
+      file's own parsed fields (`{exp}_{line}_{letter}_{diffdate}.ods`)
+      rather than assumed to be just `{line}.ods`.
+    Each well's condition is parsed with parse_fused_condition (DRUG_DOSEuM),
+    not parse_condition (DRUG (DOSE)) - the layout can list a reference
+    comparator drug (e.g. 'LTX1_10uM') alongside the primary compound, DMSO/
+    vehicle wells, and excluded wells ('X'/'Y').
+
+    Filename convention: exp_line_DIV_letter_treatmenttimeFused_diffdate_recdate_*
+    (8 fields; `letter` is just a per-plate id here, not necessarily
+    alphabetic).
+
+    This is the unit of parallelism for building the conditions table - each
+    file is independent, so it can run inside a ProcessPoolExecutor worker.
+    Must stay a plain module-level function (not a notebook closure) so it
+    can be pickled and sent to worker processes.
+
+    burst_params: optional dict of get_pop_bursts kwargs, forwarded to
+    get_features for every well in this file - see get_features/
+    DEFAULT_BURST_PARAMS.
+
+    Returns:
+        (results, skipped): results is a list of (id_, row) tuples; skipped
+        is the filename if it didn't match the expected 8-field naming
+        convention or had no matching layout file, otherwise None.
+    """
+    sp_file = file.split('_')
+    if len(sp_file) != 8:
+        return [], file
+
+    exp, line, DIV, letter, tt_raw, diff_date, rec_date, _ = sp_file
+    if tt_raw == 'baseline':
+        treatment_time = 'baseline'
+    elif tt_raw.startswith(drug):
+        treatment_time = tt_raw[len(drug):]
+    else:
+        treatment_time = tt_raw
+
+    layout_name = f'{exp}_{line}_{letter}_{diff_date}'
+    try:
+        layout_df = pd.read_excel(os.path.join(layouts_path, layout_name + '.ods'),
+                                   sheet_name=0, engine='odf')
+    except Exception as e:
+        print(f"layout read error ({file}):", e)
+        return [], file
+
+    layout = {}
+    for _, row_ in layout_df.iterrows():
+        row_label = row_.iloc[0]
+        for col_idx, value in enumerate(row_.iloc[1:], start=1):
+            layout[f"{row_label}{col_idx}"] = value
+
+    file_path = os.path.join(main_path, diff, week, file)
+    spikes, bursts, netbursts = read_ephys(file_path)
+
+    results = []
+    for well, condition in layout.items():
+        if condition in ('X', 'Y'):
+            continue
+        cond_drug, dose = parse_fused_condition(condition)
+        id_ = f"{rec_date}_{well}_{line}_{treatment_time}_{DIV}_{letter}"
+        features = get_features(well, spikes, bursts, netbursts, burst_params=burst_params)
+        row = [file_path, line, diff_date, week, DIV, treatment_time, rec_date,
+               layout_name, well, cond_drug, dose, condition, *features]
+        results.append((id_, row))
+
+    return results, None
+
+
+def process_plate_recording_file(main_path, diff, subdir, file, burst_params=None):
+    """Process one recording file from a layout-less, one-condition-per-plate
+    experiment (e.g. an ASO time-course): every well on the plate shares the
+    same cell line and treatment condition, both already encoded in the
+    filename, so - unlike process_recording_file/process_multidrug_recording_file/
+    process_fused_drug_recording_file - there is no external layout file to
+    read. The wells to process are simply whatever 'Well Label' values appear
+    in the recording's own spikes CSV.
+
+    Filename convention: exp_line_DIV_plate_timepoint_daysaftertreatment_diffdate_recdate_suffix
+    (9 fields, same shape as process_recording_file's). `timepoint` is a
+    condition label (e.g. 'baseline'/'ASO') and
+    `daysaftertreatment` is the day count as a string (e.g. '0'/'4'/'7') -
+    together they distinguish the plate's timepoints within one diff, since
+    unlike process_recording_file's 'drug' field, there's no separate compound
+    identity here.
+
+    This is the unit of parallelism for building the conditions table - each
+    file is independent, so it can run inside a ProcessPoolExecutor worker.
+    Must stay a plain module-level function (not a notebook closure) so it can
+    be pickled and sent to worker processes.
+
+    burst_params: optional dict of get_pop_bursts kwargs, forwarded to
+    get_features for every well in this file - see get_features/
+    DEFAULT_BURST_PARAMS.
+
+    Returns:
+        (results, skipped): results is a list of (id_, row) tuples; skipped is
+        the filename if it didn't match the expected 9-field naming
+        convention, otherwise None.
+    """
+    sp_file = file.split('_')
+    if len(sp_file) != 9:
+        return [], file
+
+    exp, line, DIV, plate, timepoint, days_after, diff_date, rec_date, _ = sp_file
+
+    file_path = os.path.join(main_path, diff, subdir, file)
+    spikes, bursts, netbursts = read_ephys(file_path)
+
+    results = []
+    for well in sorted(spikes['Well Label'].unique()):
+        id_ = f"{rec_date}_{well}_{plate}_{line}_{timepoint}_{days_after}_{DIV}"
+        features = get_features(well, spikes, bursts, netbursts, burst_params=burst_params)
+        row = [file_path, line, plate, DIV, timepoint, days_after, diff_date, rec_date,
+               well, *features]
+        results.append((id_, row))
+
+    return results, None
+
+
+def parse_layout_condition(raw):
+    """Split a "CellLine_Construct_Dose" layout cell (e.g. 'P22-5_ASO4_1µM',
+    'P22-5_None_None') into (cell_line, construct, dose).
+
+    Used for process_plate_layout_recording_file's per-well layout, where
+    every field is always present and underscore-joined (unlike
+    parse_condition's "DRUG (DOSE)" or parse_fused_condition's
+    "DRUG_DOSEuM"). The literal string 'None' in either the construct or
+    dose position means that field doesn't apply to this well (e.g. an
+    untreated/baseline well) and is returned as Python None rather than the
+    string.
+    """
+    parts = str(raw).strip().split('_')
+    if len(parts) != 3:
+        return raw, None, None
+    cell_line, construct, dose = parts
+    return cell_line, (None if construct == 'None' else construct), (None if dose == 'None' else dose)
+
+
+def process_plate_layout_recording_file(main_path, layouts_path, diff, subdir, file, burst_params=None):
+    """Process one recording file from a layout-backed, one-condition-per-well
+    experiment (e.g. an ASO time-course where each plate has its own
+    per-well layout workbook): like process_plate_recording_file, one file =
+    one plate, but here individual wells within the plate can carry
+    different conditions (construct/dose) or be excluded, so a layout is
+    required.
+
+    Filename convention: exp_line_DIV_plate_timepoint_daysaftertreatment_diffdate_recdate_suffix
+    (9 fields, same shape as process_plate_recording_file's) - `plate` is
+    'Plate<N>' in the recording filename but bare '<N>' in the layout
+    filename below.
+
+    Layout files live at layouts_path/Diff<diffdate>/, one workbook per
+    plate, named like the plate's own *baseline* recording but with the
+    bare plate number (exp_cellgroup_DIV_N_baseline_0_diffdate_recdate.xlsx)
+    - located here by matching just the plate number and diff date, since a
+    day4/day7 recording's own DIV/rec_date differ from the (always-baseline)
+    ones in the layout's filename. Each workbook has one sheet per
+    timepoint ('baseline', '<days>days'), read with read_layout_single.
+    Wells marked 'X' (or 'Y') in the layout are excluded entirely; every
+    other cell is a "CellLine_Construct_Dose" string parsed with
+    parse_layout_condition.
+
+    This is the unit of parallelism for building the conditions table - each
+    file is independent, so it can run inside a ProcessPoolExecutor worker.
+    Must stay a plain module-level function (not a notebook closure) so it
+    can be pickled and sent to worker processes.
+
+    burst_params: optional dict of get_pop_bursts kwargs, forwarded to
+    get_features for every well in this file - see get_features/
+    DEFAULT_BURST_PARAMS.
+
+    Returns:
+        (results, skipped): results is a list of (id_, row) tuples; skipped
+        is the filename if it didn't match the expected 9-field naming
+        convention or had no matching layout file, otherwise None.
+    """
+    sp_file = file.split('_')
+    if len(sp_file) != 9:
+        return [], file
+
+    exp, line, DIV, plate, timepoint, days_after, diff_date, rec_date, _ = sp_file
+    plate_num = plate[len('Plate'):] if plate.startswith('Plate') else plate
+
+    diff_layout_dir = os.path.join(layouts_path, f'Diff{diff_date}')
+    candidates = []
+    if os.path.isdir(diff_layout_dir):
+        for name in os.listdir(diff_layout_dir):
+            stem, ext = os.path.splitext(name)
+            if ext.lower() != '.xlsx':
+                continue
+            fields = stem.split('_')
+            if len(fields) == 8 and fields[3] == plate_num:
+                candidates.append(name)
+
+    if len(candidates) != 1:
+        print(f"layout match error ({file}): found {len(candidates)} candidates in {diff_layout_dir}")
+        return [], file
+
+    layout_path = os.path.join(diff_layout_dir, candidates[0])
+    sheet_name = 'baseline' if timepoint == 'baseline' else f'{days_after}days'
+    try:
+        layout = read_layout_single(layout_path, sheet_name)
+    except Exception as e:
+        print(f"layout read error ({file}):", e)
+        return [], file
+
+    file_path = os.path.join(main_path, diff, subdir, file)
+    spikes, bursts, netbursts = read_ephys(file_path)
+
+    results = []
+    for well, raw_condition in layout.items():
+        condition = str(raw_condition).strip()
+        if condition in ('X', 'Y'):
+            continue
+        cell_line, construct, dose = parse_layout_condition(condition)
+        id_ = f"{rec_date}_{well}_{plate}_{line}_{timepoint}_{days_after}_{DIV}"
+        features = get_features(well, spikes, bursts, netbursts, burst_params=burst_params)
+        row = [file_path, layout_path, condition, cell_line, construct, dose, line, plate, DIV,
+               timepoint, days_after, diff_date, rec_date, well, *features]
         results.append((id_, row))
 
     return results, None

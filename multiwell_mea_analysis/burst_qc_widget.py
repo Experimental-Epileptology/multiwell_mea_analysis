@@ -53,7 +53,11 @@ def create_burst_qc_widget(df):
     ipywidgets.VBox
     """
     if 'accepted' not in df.columns:
-        df['accepted'] = np.nan
+        # Default True, not unlabeled: rows already reaching this df have
+        # already survived any upstream exclusion (e.g. a layout's 'X'
+        # wells), so "not yet visually reviewed" should read as accepted
+        # until a Reject click says otherwise, not as missing/NaN.
+        df['accepted'] = True
     if 'burst parameters' not in df.columns:
         df['burst parameters'] = ''
 
@@ -81,6 +85,17 @@ def create_burst_qc_widget(df):
         if file_path not in ephys_cache:
             ephys_cache[file_path] = read_ephys(file_path)
         return ephys_cache[file_path]
+
+    def wells_for_file(file_path):
+        """Wells to offer for this file: df's own 'well' rows for it (so a
+        layout that dropped 'X'-marked wells upstream is respected here too),
+        falling back to the full plate if df has none (e.g. no 'well' column,
+        or this file/df wasn't built from a layout)."""
+        if 'well' in df.columns:
+            wells = sorted(df.loc[df['file_path'] == file_path, 'well'].dropna().unique().tolist())
+            if wells:
+                return wells
+        return list(WELL_NAMES)
 
     def _mask(file_path, well_name):
         if 'well' in df.columns:
@@ -245,8 +260,9 @@ def create_burst_qc_widget(df):
         value=0, min=0, max=len(unique_files) - 1, step=1,
         description='File:', continuous_update=False,
         layout=widgets.Layout(width='500px'))
+    _initial_wells = wells_for_file(unique_files[0]) if unique_files else list(WELL_NAMES)
     well_dropdown = widgets.Dropdown(
-        options=WELL_NAMES, value='A1', description='Well:',
+        options=_initial_wells, value=_initial_wells[0], description='Well:',
         layout=widgets.Layout(width='220px'))
     prev_file_btn = widgets.Button(description='← File')
     next_file_btn = widgets.Button(description='File →')
@@ -279,14 +295,28 @@ def create_burst_qc_widget(df):
             file_slider.value += 1
 
     def on_prev_well(_):
-        idx = WELL_NAMES.index(well_dropdown.value)
+        opts = well_dropdown.options
+        idx = opts.index(well_dropdown.value)
         if idx > 0:
-            well_dropdown.value = WELL_NAMES[idx - 1]
+            well_dropdown.value = opts[idx - 1]
 
     def on_next_well(_):
-        idx = WELL_NAMES.index(well_dropdown.value)
-        if idx < len(WELL_NAMES) - 1:
-            well_dropdown.value = WELL_NAMES[idx + 1]
+        opts = well_dropdown.options
+        idx = opts.index(well_dropdown.value)
+        if idx < len(opts) - 1:
+            well_dropdown.value = opts[idx + 1]
+
+    def on_file_change(change):
+        """Refresh the well list for the newly selected file before redrawing,
+        so QC mode only ever offers wells df actually has for this file.
+        Reassigning .options alone resets .value to the first new option
+        when the old value isn't in the new list (ipywidgets Selection
+        behavior) - that itself fires well_dropdown's own redraw observer,
+        so the explicit redraw() below is what actually repaints the plot
+        for cases where the value happens to stay valid across files."""
+        wells = wells_for_file(unique_files[change['new']])
+        well_dropdown.options = wells
+        redraw()
 
     def on_accept(_):
         set_accept_value(file_slider.value, well_dropdown.value, True)
@@ -304,6 +334,7 @@ def create_burst_qc_widget(df):
     next_well_btn.on_click(on_next_well)
     accept_btn.on_click(on_accept)
     reject_btn.on_click(on_reject)
+    file_slider.observe(on_file_change, names='value')
 
     qc_controls = widgets.VBox([
         widgets.HBox([prev_file_btn, next_file_btn, file_slider]),
@@ -424,8 +455,10 @@ def create_burst_qc_widget(df):
     default_btn.on_click(on_default)
     auto_isi_btn.on_click(on_auto_isi)
 
-    # All interactive controls call a single redraw()
-    for w in [file_slider, well_dropdown, sample_slider,
+    # All interactive controls call a single redraw() (file_slider is wired
+    # separately via on_file_change, which refreshes well_dropdown's options
+    # first, then redraws).
+    for w in [well_dropdown, sample_slider,
               maxISIstart_slider, maxISIb_slider, minBdur_slider,
               minIBI_slider, minSburst_slider,
               onset_threshold_slider, min_active_electrodes_slider,
