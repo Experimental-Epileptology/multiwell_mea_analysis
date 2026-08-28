@@ -768,7 +768,7 @@ def process_plate_recording_file(main_path, diff, subdir, file, burst_params=Non
 
     results = []
     for well in sorted(spikes['Well Label'].unique()):
-        id_ = f"{rec_date}_{well}_{plate}_{line}_{timepoint}_{days_after}_{DIV}"
+        id_ = f"{diff_date}_{rec_date}_{well}_{plate}_{line}_{timepoint}_{days_after}_{DIV}"
         features = get_features(well, spikes, bursts, netbursts, burst_params=burst_params)
         row = [file_path, line, plate, DIV, timepoint, days_after, diff_date, rec_date,
                well, *features]
@@ -873,7 +873,7 @@ def process_plate_layout_recording_file(main_path, layouts_path, diff, subdir, f
         if condition in ('X', 'Y'):
             continue
         cell_line, construct, dose = parse_layout_condition(condition)
-        id_ = f"{rec_date}_{well}_{plate}_{line}_{timepoint}_{days_after}_{DIV}"
+        id_ = f"{diff_date}_{rec_date}_{well}_{plate}_{line}_{timepoint}_{days_after}_{DIV}"
         features = get_features(well, spikes, bursts, netbursts, burst_params=burst_params)
         row = [file_path, layout_path, condition, cell_line, construct, dose, line, plate, DIV,
                timepoint, days_after, diff_date, rec_date, well, *features]

@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import ipywidgets as widgets
-from IPython.display import clear_output
+from IPython.display import clear_output, display
 
 from .ephys_proc import auto_maxISI
 from .MEA_features import gid_to_numbers, read_ephys, get_pop_bursts
@@ -189,13 +189,26 @@ def create_burst_qc_widget(df):
 
     output = widgets.Output()
 
+    # Created once and reused for every redraw (clear + redraw onto the same
+    # Axes), rather than a fresh plt.subplots() per call. Redraws happen from
+    # ipywidgets callbacks, not real cell executions, so IPython's usual
+    # "close figures after the cell runs" hook never fires for them; with the
+    # interactive ipympl/'widget' backend specifically, creating a brand-new
+    # Figure inside a callback like that is a known trigger for the canvas
+    # failing to (re)attach as a live widget and silently falling back to a
+    # flat/static render instead - a persistent Axes plus display(fig)
+    # sidesteps that, and works the same way under the plain 'inline' backend.
+    with plt.ioff():
+        fig, ax = plt.subplots(1, 1, figsize=(5, 2), dpi=200)
+    plt.close(fig)  # detach from pyplot's global state; we display it manually below
+
     def _plot(file_path, well_name, title_prefix=''):
         """Plot into the current output context (call inside `with output:`)."""
         spikes, bursts, nbursts = load_ephys_by_path(file_path)
         spikes_well = spikes[spikes['Well Label'] == well_name]
         nbursts_well = nbursts[nbursts['Well Label'] == well_name]
 
-        fig, ax = plt.subplots(1, 1, figsize=(5, 2), dpi=200)
+        ax.clear()
         base_title = f"{title_prefix}Well {well_name} | {os.path.basename(str(file_path))}"
 
         if len(spikes_well) == 0:
@@ -204,7 +217,7 @@ def create_burst_qc_widget(df):
                     transform=ax.transAxes)
             ax.set_ylabel("Channel")
             fig.tight_layout()
-            plt.show()
+            display(fig)
             return
 
         st_p = np.squeeze(na(spikes_well.filter(items=['Timestamp [µs]'])) * 1e-6)
@@ -240,7 +253,7 @@ def create_burst_qc_widget(df):
         ax.set_ylabel("Channel")
         ax.set_title(f"{base_title} | MI bursts: {len(mi_b_times)}", fontsize=9)
         fig.tight_layout()
-        plt.show()
+        display(fig)
 
     # ------------------------------------------------------------------
     # Single redraw dispatcher
