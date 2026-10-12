@@ -34,10 +34,6 @@ from multiwell_mea_analysis.MEA_features import get_features, get_pop_bursts
 from multiwell_mea_analysis.burst_qc_widget import create_burst_qc_widget
 ```
 
-## Versioning
+## Credits 
 
-Day-to-day development happens via editable installs across projects (shared
-history, no version bump needed to propagate a fix). When a project needs a
-reproducible pinned snapshot (e.g. for a paper), tag a commit here
-(`git tag vX.Y.Z`) and have that project install the tag instead of the
-editable path.
+Original code is written by Oleg Vinogradov. Claude code was used to refactor and improve the code. 

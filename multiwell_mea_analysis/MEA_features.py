@@ -434,8 +434,8 @@ def get_features(well_name, spikes, bursts, netbursts, burst_params=None):
 
     burst_params: optional dict of get_pop_bursts kwargs (maxISIstart,
     maxISIb, minBdur, minIBI, minSburst, onset_threshold,
-    min_active_electrodes, mad_multiplier) used for the NIBInew/NBDnew
-    features. Defaults to DEFAULT_BURST_PARAMS when not given.
+    min_active_electrodes, mad_multiplier) used for the "(custom)"
+    network-burst features. Defaults to DEFAULT_BURST_PARAMS when not given.
     """
     spikes_well = spikes[spikes['Well Label'] == well_name]
     bursts_well = bursts[bursts['Well Label'] == well_name]
@@ -882,9 +882,14 @@ def process_plate_layout_recording_file(main_path, layouts_path, diff, subdir, f
     return results, None
 
 
-feature_names = ['ISI', 'CV_ISI', 'FR',
-                 'IBI', 'CV_IBI', 'Burst_Rate',
-                 'BD', 'CV_BD', 'In-burst_Rate',
-                 'NIBI', 'CV NIBI', 'NB_Rate', 'NBD', 'CV NBD',
-                 'NIBInew', 'CV NIBInew', 'NBDnew', 'CV NBDnew',
-                 'In-NB_Rate', 'Random_Spikes', 'Total_Burst_Time', 'smbr']
+# Features suffixed "(MCS)" come straight from the Multi Channel Systems
+# bursts.csv/networkbursts.csv exports (burst_features/netburst_features);
+# features suffixed "(custom)" come from this package's own from-scratch
+# population burst detector (get_new_bursts -> get_pop_bursts ->
+# pop_burst_detection in ephys_proc.py) instead of MCS's native detection.
+feature_names = ['ISI [s]', 'CV_ISI', 'FR [Hz]',
+                 'IBI (MCS) [s]', 'CV_IBI (MCS)', 'Burst_Rate (MCS) [Hz]',
+                 'BD (MCS) [s]', 'CV_BD (MCS)', 'In-burst_Rate (MCS) [Hz]',
+                 'NIBI (MCS) [s]', 'CV_NIBI (MCS)', 'NB_Rate (MCS) [Hz]', 'NBD (MCS) [s]', 'CV_NBD (MCS)',
+                 'NIBI (custom) [s]', 'CV_NIBI (custom)', 'NBD (custom) [s]', 'CV_NBD (custom)',
+                 'In-NB_Rate (MCS) [Hz]', 'Random_Spikes (MCS) [%]', 'Total_Burst_Time (MCS)', 'smbr (MCS)']
