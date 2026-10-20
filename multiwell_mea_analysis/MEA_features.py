@@ -522,6 +522,72 @@ def process_recording_file(main_path, layouts_path, diff, week, file, burst_para
     return results, None
 
 
+def convert_date_yyyymmdd_to_ddmmyy(date_str):
+    """Convert a recording filename's YYYYMMDD diff date to the DDMMYY form
+    used in this dataset's layout filenames (e.g. '20250219' -> '190225')."""
+    from datetime import datetime
+    return datetime.strptime(date_str, "%Y%m%d").strftime("%d%m%y")
+
+
+def process_dose_response_recording_file(main_path, layouts_path, diff, week, file, burst_params=None):
+    """Process one recording file from the early single-compound ("LTX")
+    dose-response dataset (e.g. the Bioni10C/Bioni37A/Kolf control-line
+    comparison): parse its name, load its well layout, read its
+    spikes/bursts/netbursts CSVs once, and compute features for every well.
+
+    Unlike process_recording_file, there's no separate `drug` filename
+    field - the whole experiment is a single compound, so each well's
+    layout cell is just its dose (e.g. '0.1'/'untreated'/'DMSO'/'X'), not a
+    combined "DRUG (DOSE)" string.
+
+    Filename convention: exp_line_DIV_batch_treatmenttime_diffdate_recdate_suffix
+    (8 fields). Layout files are per (line, batch, diff) CSVs named
+    "{line}_{batch}_{diffdate as DDMMYY}.csv" - note the layout filename's
+    date is DDMMYY while the recording filename's is YYYYMMDD, hence
+    convert_date_yyyymmdd_to_ddmmyy.
+
+    This is the unit of parallelism for building the conditions table - each
+    file is independent, so it can run inside a ProcessPoolExecutor worker.
+    Must stay a plain module-level function (not a notebook closure) so it
+    can be pickled and sent to worker processes.
+
+    burst_params: optional dict of get_pop_bursts kwargs, forwarded to
+    get_features for every well in this file - see get_features/
+    DEFAULT_BURST_PARAMS.
+
+    Returns:
+        (results, skipped): results is a list of (id_, row) tuples; skipped
+        is the filename if it didn't match the expected 8-field naming
+        convention or had no matching layout file, otherwise None.
+    """
+    sp_file = file.split('_')
+    if len(sp_file) != 8:
+        return [], file
+
+    exp, line, DIV, batch, treatment_time, diff_date, rec_date, _ = sp_file
+    layout_name = f"{line}_{batch}_{convert_date_yyyymmdd_to_ddmmyy(diff_date)}"
+    try:
+        layout = read_layout(os.path.join(layouts_path, layout_name + '.csv'))
+    except Exception as e:
+        print(f"layout read error ({file}):", e)
+        return [], file
+
+    file_path = os.path.join(main_path, diff, week, file)
+    spikes, bursts, netbursts = read_ephys(file_path)
+
+    results = []
+    for well, dose in layout.items():
+        if dose in ('X', 'Y'):
+            continue
+        id_ = f"{rec_date}_{well}_{batch}_{line}_{treatment_time}_{DIV}"
+        features = get_features(well, spikes, bursts, netbursts, burst_params=burst_params)
+        row = [file_path, line, diff_date, batch, week, DIV, treatment_time, rec_date,
+               layout_name, well, dose, *features]
+        results.append((id_, row))
+
+    return results, None
+
+
 def read_layout_single(filename, sheet_name):
     """Read one sheet of a per-cell-line layout workbook into well -> condition.
 
